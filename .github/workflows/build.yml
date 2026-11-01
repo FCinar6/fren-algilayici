@@ -12,20 +12,22 @@ jobs:
       - name: Kodu Cek
         uses: actions/checkout@v4
 
-      - name: Java Kur
+      - name: Java 17 Kur
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Flutter Kur
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.3'
           channel: 'stable'
+          cache: true
 
-      - name: Android Projesini Hatasiz Uret
-        run: flutter create . --platforms=android --org=com.example
+      - name: Android Altyapisini Olustur
+        run: |
+          flutter config --no-analytics
+          flutter create . --project-name=vehicle_brake_detector --platforms=android --org=com.example
 
       - name: Paketleri Getir
         run: flutter pub get
