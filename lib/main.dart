@@ -1,16 +1,14 @@
 import 'dart:async';
 import 'dart:collection';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:sensors_plus/sensors_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  PlatformDispatcher.instance.onError = (error, stack) => true;
   runApp(const VehicleStatusApp());
 }
 
+/// Uygulamanın ana MaterialApp widget'ı
 class VehicleStatusApp extends StatelessWidget {
   const VehicleStatusApp({super.key});
 
@@ -56,11 +54,12 @@ class MovingAverageFilter {
 
 /// 3 Araç Durumu
 enum VehicleState {
-  braking,      // Fren Yapılıyor (Koyu Kırmızı)
+  braking,      // Fren Yapılıyor (Kırmızı)
   accelerating, // Hızlanıyor (Koyu Mavi)
   cruising,     // Sabit Hızla Gidiyor (Siyah)
 }
 
+/// Ana Ekran
 class VehicleStatusScreen extends StatefulWidget {
   const VehicleStatusScreen({super.key});
 
@@ -69,19 +68,14 @@ class VehicleStatusScreen extends StatefulWidget {
 }
 
 class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
-  static const String _keyBrakeThreshold = 'brake_threshold';
-  static const String _keyBrakeDebounceMs = 'brake_debounce_ms';
-  static const String _keyAccelThreshold = 'accel_threshold';
-  static const String _keyAccelDebounceMs = 'accel_debounce_ms';
-  static const String _keySelectedAxis = 'selected_axis';
-
-  // Varsayılan Değerler
+  // Varsayılan Parametreler
   static const double _defaultBrakeThreshold = -3.5;
   static const int _defaultBrakeDebounceMs = 150;
   static const double _defaultAccelThreshold = 1.5;
   static const int _defaultAccelDebounceMs = 150;
   static const String _defaultAxis = 'Z'; // Dik araç tutucu
 
+  // Aktif Parametreler
   double _brakeThreshold = _defaultBrakeThreshold;
   int _brakeDebounceMs = _defaultBrakeDebounceMs;
   double _accelThreshold = _defaultAccelThreshold;
@@ -100,53 +94,7 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
   @override
   void initState() {
     super.initState();
-    _loadPreferences().then((_) => _startListeningSensors());
-  }
-
-  Future<void> _loadPreferences() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      if (mounted) {
-        setState(() {
-          _brakeThreshold = prefs.getDouble(_keyBrakeThreshold) ?? _defaultBrakeThreshold;
-          _brakeDebounceMs = prefs.getInt(_keyBrakeDebounceMs) ?? _defaultBrakeDebounceMs;
-          _accelThreshold = prefs.getDouble(_keyAccelThreshold) ?? _defaultAccelThreshold;
-          _accelDebounceMs = prefs.getInt(_keyAccelDebounceMs) ?? _defaultAccelDebounceMs;
-          _selectedAxis = prefs.getString(_keySelectedAxis) ?? _defaultAxis;
-        });
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _savePreferences({
-    required double newBrakeThresh,
-    required int newBrakeDebounce,
-    required double newAccelThresh,
-    required int newAccelDebounce,
-    required String newAxis,
-  }) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble(_keyBrakeThreshold, newBrakeThresh);
-      await prefs.setInt(_keyBrakeDebounceMs, newBrakeDebounce);
-      await prefs.setDouble(_keyAccelThreshold, newAccelThresh);
-      await prefs.setInt(_keyAccelDebounceMs, newAccelDebounce);
-      await prefs.setString(_keySelectedAxis, newAxis);
-    } catch (_) {}
-
-    if (mounted) {
-      setState(() {
-        _brakeThreshold = newBrakeThresh;
-        _brakeDebounceMs = newBrakeDebounce;
-        _accelThreshold = newAccelThresh;
-        _accelDebounceMs = newAccelDebounce;
-        _selectedAxis = newAxis;
-        _filter.reset();
-        _belowBrakeThresholdStart = null;
-        _aboveAccelThresholdStart = null;
-        _currentState = VehicleState.cruising;
-      });
-    }
+    _startListeningSensors();
   }
 
   void _startListeningSensors() {
@@ -178,15 +126,16 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
   void _processSensorReading(double x, double y, double z) {
     double targetAcc = 0.0;
 
+    // Seçili eksene göre ivmeyi yönlendir
     switch (_selectedAxis) {
-      case 'Z':
-        targetAcc = -z; // Dik Tutucu
+      case 'Z': // 📱 Dik Araç Tutucu (Ekran size dönük, arkası ön cama bakar)
+        targetAcc = -z;
         break;
-      case '-Z':
-        targetAcc = z; // Dik Ters Tutucu
+      case '-Z': // 📱 Dik Araç Tutucu (Ters Montaj)
+        targetAcc = z;
         break;
-      case 'Y':
-        targetAcc = y; // Yatay Konsol
+      case 'Y': // Yatay Konsol / Koltuk
+        targetAcc = y;
         break;
       default:
         targetAcc = -z;
@@ -197,6 +146,7 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
     VehicleState nextState = VehicleState.cruising;
 
     if (smoothed <= _brakeThreshold) {
+      // Fren Eşiği Aşıldı
       _belowBrakeThresholdStart ??= now;
       _aboveAccelThresholdStart = null;
       final int elapsed = now.difference(_belowBrakeThresholdStart!).inMilliseconds;
@@ -204,6 +154,7 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
         nextState = VehicleState.braking;
       }
     } else if (smoothed >= _accelThreshold) {
+      // Hızlanma Eşiği Aşıldı
       _aboveAccelThresholdStart ??= now;
       _belowBrakeThresholdStart = null;
       final int elapsed = now.difference(_aboveAccelThresholdStart!).inMilliseconds;
@@ -211,6 +162,7 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
         nextState = VehicleState.accelerating;
       }
     } else {
+      // Eşikler Arasında (Sabit Hız / Sakin Seyir)
       _belowBrakeThresholdStart = null;
       _aboveAccelThresholdStart = null;
       nextState = VehicleState.cruising;
@@ -230,6 +182,7 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
     super.dispose();
   }
 
+  /// Ayarlar Paneli (Hem Klavyeyle Sayı Yazma Hem Slider)
   void _openSettingsDialog() {
     double tempBrakeThresh = _brakeThreshold;
     int tempBrakeDebounce = _brakeDebounceMs;
@@ -439,17 +392,21 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
                         Expanded(
                           child: ElevatedButton(
                             style: ElevatedButton.styleFrom(backgroundColor: Colors.emerald, padding: const EdgeInsets.symmetric(vertical: 14)),
-                            onPressed: () async {
-                              await _savePreferences(
-                                newBrakeThresh: tempBrakeThresh,
-                                newBrakeDebounce: tempBrakeDebounce,
-                                newAccelThresh: tempAccelThresh,
-                                newAccelDebounce: tempAccelDebounce,
-                                newAxis: tempAxis,
-                              );
-                              if (context.mounted) Navigator.of(context).pop();
+                            onPressed: () {
+                              setState(() {
+                                _brakeThreshold = tempBrakeThresh;
+                                _brakeDebounceMs = tempBrakeDebounce;
+                                _accelThreshold = tempAccelThresh;
+                                _accelDebounceMs = tempAccelDebounce;
+                                _selectedAxis = tempAxis;
+                                _filter.reset();
+                                _belowBrakeThresholdStart = null;
+                                _aboveAccelThresholdStart = null;
+                                _currentState = VehicleState.cruising;
+                              });
+                              Navigator.of(context).pop();
                             },
-                            child: const Text('Kaydet ve Uygula', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                            child: const Text('Uygula', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                           ),
                         ),
                       ],
@@ -548,9 +505,9 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
             const SizedBox(height: 12),
             Text(
               _currentState == VehicleState.braking
-                  ? 'Eşik: ≤ ${_brakeThreshold.toStringAsFixed(1)} m/s² · $_brakeDebounceMs ms'
+                  ? 'Fren Eşiği: ≤ ${_brakeThreshold.toStringAsFixed(1)} m/s² · ${_brakeDebounceMs}ms'
                   : _currentState == VehicleState.accelerating
-                      ? 'Eşik: ≥ +${_accelThreshold.toStringAsFixed(1)} m/s² · $_accelDebounceMs ms'
+                      ? 'Hızlanma Eşiği: ≥ +${_accelThreshold.toStringAsFixed(1)} m/s² · ${_accelDebounceMs}ms'
                       : 'Eşikler Arası Normal Seyir',
               style: TextStyle(fontSize: 13, color: textColor.withOpacity(0.85), fontWeight: FontWeight.w500),
             ),
