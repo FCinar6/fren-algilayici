@@ -5,29 +5,13 @@ import 'package:sensors_plus/sensors_plus.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const VehicleStatusApp());
+  runApp(const MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: VehicleDetectorScreen(),
+  ));
 }
 
-/// Uygulamanın ana MaterialApp widget'ı
-class VehicleStatusApp extends StatelessWidget {
-  const VehicleStatusApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Araç Durum Algılayıcı',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        useMaterial3: true,
-        scaffoldBackgroundColor: Colors.black,
-      ),
-      home: const VehicleStatusScreen(),
-    );
-  }
-}
-
-/// 8 Elemanlı FIFO Kuyruğu ile Çalışan Hareketli Ortalama Filtresi
+/// 8 Elemanlı FIFO Kuyruğu ile Hareketli Ortalama Filtresi
 class MovingAverageFilter {
   final int windowSize;
   final Queue<double> _queue = Queue<double>();
@@ -38,403 +22,243 @@ class MovingAverageFilter {
   double add(double value) {
     _queue.addLast(value);
     _runningSum += value;
-
     if (_queue.length > windowSize) {
       _runningSum -= _queue.removeFirst();
     }
-
     return _runningSum / _queue.length;
   }
-
-  void reset() {
-    _queue.clear();
-    _runningSum = 0.0;
-  }
 }
 
-/// 3 Araç Durumu
-enum VehicleState {
-  braking,      // Fren Yapılıyor (Kırmızı)
-  accelerating, // Hızlanıyor (Koyu Mavi)
-  cruising,     // Sabit Hızla Gidiyor (Siyah)
-}
-
-/// Ana Ekran
-class VehicleStatusScreen extends StatefulWidget {
-  const VehicleStatusScreen({super.key});
+class VehicleDetectorScreen extends StatefulWidget {
+  const VehicleDetectorScreen({super.key});
 
   @override
-  State<VehicleStatusScreen> createState() => _VehicleStatusScreenState();
+  State<VehicleDetectorScreen> createState() => _VehicleDetectorScreenState();
 }
 
-class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
-  // Varsayılan Parametreler
-  static const double _defaultBrakeThreshold = -3.5;
-  static const int _defaultBrakeDebounceMs = 150;
-  static const double _defaultAccelThreshold = 1.5;
-  static const int _defaultAccelDebounceMs = 150;
-  static const String _defaultAxis = 'Z'; // Dik araç tutucu
+class _VehicleDetectorScreenState extends State<VehicleDetectorScreen> {
+  // Parametreler
+  double _brakeThresh = -3.5;
+  int _brakeDebounce = 150;
+  double _accelThresh = 1.5;
+  int _accelDebounce = 150;
+  String _axis = 'Z'; // Dik tutucu varsayılan
 
-  // Aktif Parametreler
-  double _brakeThreshold = _defaultBrakeThreshold;
-  int _brakeDebounceMs = _defaultBrakeDebounceMs;
-  double _accelThreshold = _defaultAccelThreshold;
-  int _accelDebounceMs = _defaultAccelDebounceMs;
-  String _selectedAxis = _defaultAxis;
+  StreamSubscription<dynamic>? _sub;
+  final MovingAverageFilter _filter = MovingAverageFilter();
 
-  StreamSubscription<dynamic>? _accelerometerSubscription;
-  final MovingAverageFilter _filter = MovingAverageFilter(windowSize: 8);
+  double _acc = 0.0;
+  String _status = 'SABİT HIZLA GİDİYOR';
+  Color _bgColor = Colors.black;
+  Color _textColor = const Color(0xFF00E676);
+  IconData _icon = Icons.check_circle_outline;
 
-  double _filteredAcceleration = 0.0;
-  VehicleState _currentState = VehicleState.cruising;
-
-  DateTime? _belowBrakeThresholdStart;
-  DateTime? _aboveAccelThresholdStart;
+  DateTime? _brakeStart;
+  DateTime? _accelStart;
 
   @override
   void initState() {
     super.initState();
-    _startListeningSensors();
+    _startSensors();
   }
 
-  void _startListeningSensors() {
+  void _startSensors() {
     try {
-      _accelerometerSubscription = userAccelerometerEventStream().listen(
-        (UserAccelerometerEvent event) {
-          _processSensorReading(event.x, event.y, event.z);
-        },
-        onError: (_) => _fallbackToStandard(),
-        cancelOnError: false,
-      );
+      _sub = userAccelerometerEventStream().listen((event) {
+        _process(event.x, event.y, event.z);
+      }, onError: (_) => _fallback());
     } catch (_) {
-      _fallbackToStandard();
+      _fallback();
     }
   }
 
-  void _fallbackToStandard() {
-    _accelerometerSubscription?.cancel();
+  void _fallback() {
+    _sub?.cancel();
     try {
-      _accelerometerSubscription = accelerometerEventStream().listen(
-        (AccelerometerEvent event) {
-          _processSensorReading(event.x, event.y, event.z);
-        },
-        cancelOnError: false,
-      );
+      _sub = accelerometerEventStream().listen((event) {
+        _process(event.x, event.y, event.z);
+      });
     } catch (_) {}
   }
 
-  void _processSensorReading(double x, double y, double z) {
-    double targetAcc = 0.0;
-
-    // Seçili eksene göre ivmeyi yönlendir
-    switch (_selectedAxis) {
-      case 'Z': // 📱 Dik Araç Tutucu (Ekran size dönük, arkası ön cama bakar)
-        targetAcc = -z;
-        break;
-      case '-Z': // 📱 Dik Araç Tutucu (Ters Montaj)
-        targetAcc = z;
-        break;
-      case 'Y': // Yatay Konsol / Koltuk
-        targetAcc = y;
-        break;
-      default:
-        targetAcc = -z;
+  void _process(double x, double y, double z) {
+    double raw = 0.0;
+    if (_axis == 'Z') {
+      raw = -z; // 📱 Dik Tutucu (Ekran sürücüye, sırtı ön cama bakar)
+    } else if (_axis == '-Z') {
+      raw = z; // 📱 Dik Ters
+    } else {
+      raw = y; // Yatay Konsol
     }
 
-    final double smoothed = _filter.add(targetAcc);
-    final DateTime now = DateTime.now();
-    VehicleState nextState = VehicleState.cruising;
+    final val = _filter.add(raw);
+    final now = DateTime.now();
 
-    if (smoothed <= _brakeThreshold) {
-      // Fren Eşiği Aşıldı
-      _belowBrakeThresholdStart ??= now;
-      _aboveAccelThresholdStart = null;
-      final int elapsed = now.difference(_belowBrakeThresholdStart!).inMilliseconds;
-      if (elapsed >= _brakeDebounceMs) {
-        nextState = VehicleState.braking;
+    if (val <= _brakeThresh) {
+      _brakeStart ??= now;
+      _accelStart = null;
+      if (now.difference(_brakeStart!).inMilliseconds >= _brakeDebounce) {
+        _update(val, 'FREN YAPILIYOR!', const Color(0xFF8B0000), Colors.white, Icons.warning_amber_rounded);
+        return;
       }
-    } else if (smoothed >= _accelThreshold) {
-      // Hızlanma Eşiği Aşıldı
-      _aboveAccelThresholdStart ??= now;
-      _belowBrakeThresholdStart = null;
-      final int elapsed = now.difference(_aboveAccelThresholdStart!).inMilliseconds;
-      if (elapsed >= _accelDebounceMs) {
-        nextState = VehicleState.accelerating;
+    } else if (val >= _accelThresh) {
+      _accelStart ??= now;
+      _brakeStart = null;
+      if (now.difference(_accelStart!).inMilliseconds >= _accelDebounce) {
+        _update(val, 'HIZLANIYOR', const Color(0xFF0D47A1), const Color(0xFF00E5FF), Icons.speed);
+        return;
       }
     } else {
-      // Eşikler Arasında (Sabit Hız / Sakin Seyir)
-      _belowBrakeThresholdStart = null;
-      _aboveAccelThresholdStart = null;
-      nextState = VehicleState.cruising;
+      _brakeStart = null;
+      _accelStart = null;
     }
 
-    if (mounted) {
-      setState(() {
-        _filteredAcceleration = smoothed;
-        _currentState = nextState;
-      });
-    }
+    _update(val, 'SABİT HIZLA GİDİYOR', Colors.black, const Color(0xFF00E676), Icons.check_circle_outline);
+  }
+
+  void _update(double acc, String status, Color bg, Color text, IconData icon) {
+    if (!mounted) return;
+    setState(() {
+      _acc = acc;
+      _status = status;
+      _bgColor = bg;
+      _textColor = text;
+      _icon = icon;
+    });
   }
 
   @override
   void dispose() {
-    _accelerometerSubscription?.cancel();
+    _sub?.cancel();
     super.dispose();
   }
 
-  /// Ayarlar Paneli (Hem Klavyeyle Sayı Yazma Hem Slider)
-  void _openSettingsDialog() {
-    double tempBrakeThresh = _brakeThreshold;
-    int tempBrakeDebounce = _brakeDebounceMs;
-    double tempAccelThresh = _accelThreshold;
-    int tempAccelDebounce = _accelDebounceMs;
-    String tempAxis = _selectedAxis;
-
-    final brakeThreshCtrl = TextEditingController(text: tempBrakeThresh.toStringAsFixed(1));
-    final brakeDebounceCtrl = TextEditingController(text: tempBrakeDebounce.toString());
-    final accelThreshCtrl = TextEditingController(text: tempAccelThresh.toStringAsFixed(1));
-    final accelDebounceCtrl = TextEditingController(text: tempAccelDebounce.toString());
+  void _openSettings() {
+    final bCtrl = TextEditingController(text: _brakeThresh.toStringAsFixed(1));
+    final bdCtrl = TextEditingController(text: _brakeDebounce.toString());
+    final aCtrl = TextEditingController(text: _accelThresh.toStringAsFixed(1));
+    final adCtrl = TextEditingController(text: _accelDebounce.toString());
+    String curAxis = _axis;
 
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E1E),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (BuildContext ctx) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return Padding(
-              padding: EdgeInsets.only(
-                left: 20,
-                right: 20,
-                top: 20,
-                bottom: MediaQuery.of(context).viewInsets.bottom + 24,
-              ),
-              child: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setM) => Padding(
+          padding: EdgeInsets.only(left: 20, right: 20, top: 20, bottom: MediaQuery.of(context).viewInsets.bottom + 20),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Eksen & İvme/Süre Ayarları', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                const Text('Telefon Tutucu Yönü', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                const SizedBox(height: 6),
+                Row(
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text('Eksen, İvme & Süre Ayarları', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                        IconButton(icon: const Icon(Icons.close, color: Colors.white70), onPressed: () => Navigator.of(context).pop()),
-                      ],
-                    ),
-                    const Divider(color: Colors.white24),
-
-                    // Montaj Pozisyonu
-                    const Text('Telefonun Montaj Pozisyonu', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white70)),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        _buildAxisBtn('Z', '📱 Dik Tutucu', tempAxis, (val) => setModalState(() => tempAxis = val)),
-                        const SizedBox(width: 8),
-                        _buildAxisBtn('-Z', '📱 Ters Z', tempAxis, (val) => setModalState(() => tempAxis = val)),
-                        const SizedBox(width: 8),
-                        _buildAxisBtn('Y', 'Yatay Konsol', tempAxis, (val) => setModalState(() => tempAxis = val)),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-
-                    // FREN AYARLARI (Manuel Giriş + Slider)
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: Colors.red.withOpacity(0.08), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.redAccent.withOpacity(0.3))),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text('🛑 FREN PARAMETRELERİ', style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontSize: 13)),
-                              Text('${tempBrakeThresh.toStringAsFixed(1)} m/s² · $tempBrakeDebounce ms', style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: TextFormField(
-                                  controller: brakeThreshCtrl,
-                                  keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                                  decoration: const InputDecoration(labelText: 'Fren Eşiği (m/s²)', border: OutlineInputBorder(), isDense: true),
-                                  onChanged: (val) {
-                                    final d = double.tryParse(val);
-                                    if (d != null && d < 0) setModalState(() => tempBrakeThresh = d);
-                                  },
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: TextFormField(
-                                  controller: brakeDebounceCtrl,
-                                  keyboardType: TextInputType.number,
-                                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                                  decoration: const InputDecoration(labelText: 'Fren Süresi (ms)', border: OutlineInputBorder(), isDense: true),
-                                  onChanged: (val) {
-                                    final i = int.tryParse(val);
-                                    if (i != null && i > 0) setModalState(() => tempBrakeDebounce = i);
-                                  },
-                                ),
-                              ),
-                            ],
-                          ),
-                          Slider(
-                            value: tempBrakeThresh.clamp(-7.0, -1.0),
-                            min: -7.0,
-                            max: -1.0,
-                            divisions: 60,
-                            activeColor: Colors.redAccent,
-                            onChanged: (val) {
-                              setModalState(() {
-                                tempBrakeThresh = double.parse(val.toStringAsFixed(1));
-                                brakeThreshCtrl.text = tempBrakeThresh.toStringAsFixed(1);
-                              });
-                            },
-                          ),
-                        ],
+                    _axisBtn('Z', '📱 Dik', curAxis, (v) => setM(() => curAxis = v)),
+                    const SizedBox(width: 8),
+                    _axisBtn('-Z', '📱 Ters Z', curAxis, (v) => setM(() => curAxis = v)),
+                    const SizedBox(width: 8),
+                    _axisBtn('Y', 'Yatay', curAxis, (v) => setM(() => curAxis = v)),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                const Text('Fren Eşiği (m/s²) ve Süresi (ms)', style: TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: bCtrl,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(labelText: 'Fren Eşiği', border: OutlineInputBorder(), isDense: true),
                       ),
                     ),
-
-                    const SizedBox(height: 14),
-
-                    // HIZLANMA AYARLARI (Manuel Giriş + Slider)
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: Colors.blue.withOpacity(0.08), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.blueAccent.withOpacity(0.3))),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              const Text('⚡ HIZLANMA PARAMETRELERİ', style: TextStyle(color: Colors.lightBlueAccent, fontWeight: FontWeight.bold, fontSize: 13)),
-                              Text('+${tempAccelThresh.toStringAsFixed(1)} m/s² · $tempAccelDebounce ms', style: const TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                          const SizedBox(height: 10),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: TextFormField(
-                                  controller: accelThreshCtrl,
-                                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                                  decoration: const InputDecoration(labelText: 'Hızlanma Eşiği (m/s²)', border: OutlineInputBorder(), isDense: true),
-                                  onChanged: (val) {
-                                    final d = double.tryParse(val);
-                                    if (d != null && d > 0) setModalState(() => tempAccelThresh = d);
-                                  },
-                                ),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: TextFormField(
-                                  controller: accelDebounceCtrl,
-                                  keyboardType: TextInputType.number,
-                                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                                  decoration: const InputDecoration(labelText: 'Hızlanma Süresi (ms)', border: OutlineInputBorder(), isDense: true),
-                                  onChanged: (val) {
-                                    final i = int.tryParse(val);
-                                    if (i != null && i > 0) setModalState(() => tempAccelDebounce = i);
-                                  },
-                                ),
-                              ),
-                            ],
-                          ),
-                          Slider(
-                            value: tempAccelThresh.clamp(0.5, 6.0),
-                            min: 0.5,
-                            max: 6.0,
-                            divisions: 55,
-                            activeColor: Colors.lightBlueAccent,
-                            onChanged: (val) {
-                              setModalState(() {
-                                tempAccelThresh = double.parse(val.toStringAsFixed(1));
-                                accelThreshCtrl.text = tempAccelThresh.toStringAsFixed(1);
-                              });
-                            },
-                          ),
-                        ],
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: bdCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(labelText: 'Fren Süresi (ms)', border: OutlineInputBorder(), isDense: true),
                       ),
-                    ),
-
-                    const SizedBox(height: 18),
-
-                    // Butonlar
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.white24), padding: const EdgeInsets.symmetric(vertical: 14)),
-                            onPressed: () {
-                              setModalState(() {
-                                tempBrakeThresh = _defaultBrakeThreshold;
-                                tempBrakeDebounce = _defaultBrakeDebounceMs;
-                                tempAccelThresh = _defaultAccelThreshold;
-                                tempAccelDebounce = _defaultAccelDebounceMs;
-                                tempAxis = _defaultAxis;
-                                brakeThreshCtrl.text = tempBrakeThresh.toString();
-                                brakeDebounceCtrl.text = tempBrakeDebounce.toString();
-                                accelThreshCtrl.text = tempAccelThresh.toString();
-                                accelDebounceCtrl.text = tempAccelDebounce.toString();
-                              });
-                            },
-                            child: const Text('Varsayılan'),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(backgroundColor: Colors.emerald, padding: const EdgeInsets.symmetric(vertical: 14)),
-                            onPressed: () {
-                              setState(() {
-                                _brakeThreshold = tempBrakeThresh;
-                                _brakeDebounceMs = tempBrakeDebounce;
-                                _accelThreshold = tempAccelThresh;
-                                _accelDebounceMs = tempAccelDebounce;
-                                _selectedAxis = tempAxis;
-                                _filter.reset();
-                                _belowBrakeThresholdStart = null;
-                                _aboveAccelThresholdStart = null;
-                                _currentState = VehicleState.cruising;
-                              });
-                              Navigator.of(context).pop();
-                            },
-                            child: const Text('Uygula', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          ),
-                        ),
-                      ],
                     ),
                   ],
                 ),
-              ),
-            );
-          },
-        );
-      },
+                const SizedBox(height: 16),
+                const Text('Hızlanma Eşiği (m/s²) ve Süresi (ms)', style: TextStyle(color: Colors.lightBlueAccent, fontSize: 13, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: aCtrl,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(labelText: 'Hızlanma Eşiği', border: OutlineInputBorder(), isDense: true),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: adCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(labelText: 'Hızlanma Süresi (ms)', border: OutlineInputBorder(), isDense: true),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF10B981)),
+                    onPressed: () {
+                      final b = double.tryParse(bCtrl.text);
+                      final bd = int.tryParse(bdCtrl.text);
+                      final a = double.tryParse(aCtrl.text);
+                      final ad = int.tryParse(adCtrl.text);
+                      setState(() {
+                        if (b != null) _brakeThresh = b;
+                        if (bd != null) _brakeDebounce = bd;
+                        if (a != null) _accelThresh = a;
+                        if (ad != null) _accelDebounce = ad;
+                        _axis = curAxis;
+                      });
+                      Navigator.pop(context);
+                    },
+                    child: const Text('Uygula', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
-  Widget _buildAxisBtn(String key, String title, String selected, ValueChanged<String> onSelect) {
-    final bool isSelected = key == selected;
+  Widget _axisBtn(String val, String label, String cur, ValueChanged<String> onS) {
+    final sel = val == cur;
     return Expanded(
       child: GestureDetector(
-        onTap: () => onSelect(key),
+        onTap: () => onS(val),
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
+          padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.amber.withOpacity(0.2) : Colors.white10,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: isSelected ? Colors.amber : Colors.white24),
+            color: sel ? Colors.amber.withOpacity(0.2) : Colors.white10,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: sel ? Colors.amber : Colors.white24),
           ),
           alignment: Alignment.center,
-          child: Text(title, style: TextStyle(color: isSelected ? Colors.amber : Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+          child: Text(label, style: TextStyle(color: sel ? Colors.amber : Colors.white70, fontWeight: FontWeight.bold, fontSize: 12)),
         ),
       ),
     );
@@ -442,96 +266,60 @@ class _VehicleStatusScreenState extends State<VehicleStatusScreen> {
 
   @override
   Widget build(BuildContext context) {
-    Color backgroundColor;
-    Color textColor;
-    String statusTitle;
-    IconData statusIcon;
-
-    switch (_currentState) {
-      case VehicleState.braking:
-        backgroundColor = const Color(0xFF8B0000); // Koyu Kırmızı
-        textColor = Colors.white;
-        statusTitle = 'FREN YAPILIYOR!';
-        statusIcon = Icons.warning_amber_rounded;
-        break;
-      case VehicleState.accelerating:
-        backgroundColor = const Color(0xFF0D47A1); // Koyu Mavi
-        textColor = const Color(0xFF00E5FF); // Parlak Turkuaz
-        statusTitle = 'HIZLANIYOR';
-        statusIcon = Icons.speed_rounded;
-        break;
-      case VehicleState.cruising:
-        backgroundColor = Colors.black;
-        textColor = const Color(0xFF00E676); // Parlak Yeşil
-        statusTitle = 'SABİT HIZLA GİDİYOR';
-        statusIcon = Icons.check_circle_rounded;
-        break;
-    }
-
     return Scaffold(
-      backgroundColor: backgroundColor,
+      backgroundColor: _bgColor,
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: Text(
-          _selectedAxis == 'Z' ? '📱 Dik Tutucu (Z)' : _selectedAxis == '-Z' ? '📱 Dik Ters (-Z)' : 'Yatay Konsol (Y)',
-          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white70),
-        ),
+        title: Text(_axis.contains('Z') ? '📱 Dik Tutucu ($_axis)' : 'Yatay (Y)', style: const TextStyle(color: Colors.white70, fontSize: 13)),
         actions: [
-          TextButton.icon(
-            onPressed: _openSettingsDialog,
-            icon: const Icon(Icons.tune, color: Colors.white, size: 18),
-            label: const Text('Ayarlar', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
+          IconButton(icon: const Icon(Icons.tune, color: Colors.white), onPressed: _openSettings),
         ],
       ),
       body: SafeArea(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Spacer(),
-            Icon(statusIcon, size: 100, color: textColor),
-            const SizedBox(height: 24),
-            Text(
-              statusTitle,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 34,
-                fontWeight: FontWeight.w900,
-                color: textColor,
-                letterSpacing: 1.2,
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Spacer(),
+              Icon(_icon, size: 90, color: _textColor),
+              const SizedBox(height: 20),
+              Text(
+                _status,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: _textColor),
               ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              _currentState == VehicleState.braking
-                  ? 'Fren Eşiği: ≤ ${_brakeThreshold.toStringAsFixed(1)} m/s² · ${_brakeDebounceMs}ms'
-                  : _currentState == VehicleState.accelerating
-                      ? 'Hızlanma Eşiği: ≥ +${_accelThreshold.toStringAsFixed(1)} m/s² · ${_accelDebounceMs}ms'
-                      : 'Eşikler Arası Normal Seyir',
-              style: TextStyle(fontSize: 13, color: textColor.withOpacity(0.85), fontWeight: FontWeight.w500),
-            ),
-            const Spacer(),
-            Container(
-              margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: Colors.white12),
+              const SizedBox(height: 8),
+              Text(
+                _status == 'FREN YAPILIYOR!'
+                    ? 'Eşik: ≤ ${_brakeThresh.toStringAsFixed(1)} m/s² · $_brakeDebounce ms'
+                    : _status == 'HIZLANIYOR'
+                        ? 'Eşik: ≥ +${_accelThresh.toStringAsFixed(1)} m/s² · $_accelDebounce ms'
+                        : 'Eşikler Arası Normal Seyir',
+                style: TextStyle(color: _textColor.withOpacity(0.8), fontSize: 13),
               ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('Filtreli İvme:', style: TextStyle(color: Colors.white70, fontSize: 14)),
-                  Text(
-                    '${_filteredAcceleration >= 0 ? "+" : ""}${_filteredAcceleration.toStringAsFixed(2)} m/s²',
-                    style: TextStyle(color: textColor, fontSize: 22, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
-                  ),
-                ],
+              const Spacer(),
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                decoration: BoxDecoration(
+                  color: Colors.black45,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text('Filtreli İvme:', style: TextStyle(color: Colors.white70, fontSize: 14)),
+                    Text(
+                      '${_acc >= 0 ? "+" : ""}${_acc.toStringAsFixed(2)} m/s²',
+                      style: TextStyle(color: _textColor, fontSize: 22, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
